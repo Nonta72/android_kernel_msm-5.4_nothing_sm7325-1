@@ -131,7 +131,7 @@ jobs:
             -m \
             -O "${OUT_DIR}" \
             "${OUT_DIR}/.config" \
-            custom.config
+            arch/arm64/configs/custom.config
 
           make \
             ARCH="${ARCH}" \
