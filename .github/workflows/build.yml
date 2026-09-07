@@ -41,6 +41,7 @@ jobs:
             python3 \
             rsync \
             unzip \
+            llvm \
             xz-utils
 
       - name: Download Android Clang
