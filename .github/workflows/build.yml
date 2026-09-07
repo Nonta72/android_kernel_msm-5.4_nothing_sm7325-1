@@ -88,7 +88,6 @@ jobs:
             echo "::error::Missing arch/arm64/configs/custom.config"
             exit 1
           }
-
           test -f boot_unpack/ramdisk || {
             echo "::error::Missing boot_unpack/ramdisk"
             echo "Place the Spacewar ramdisk at boot_unpack/ramdisk in the repository."
