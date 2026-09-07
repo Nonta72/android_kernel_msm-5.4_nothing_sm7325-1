@@ -1,0 +1,218 @@
+name: Build Spacewar Kernel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  CLANG_TRIPLE: aarch64-linux-gnu-
+  CLANG_VERSION: clang-r383902
+  CLANG_BRANCH: llvm-r383902b
+  MKBOOTIMG_REPO: https://android.googlesource.com/platform/system/tools/mkbootimg
+  OUT_DIR: out
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            cpio \
+            flex \
+            gcc-aarch64-linux-gnu \
+            libelf-dev \
+            libssl-dev \
+            lz4 \
+            python3 \
+            rsync \
+            unzip \
+            xz-utils
+
+      - name: Download Android Clang
+        run: |
+          set -euo pipefail
+
+          mkdir -p prebuilts/clang/host/linux-x86
+
+          curl -L --fail --retry 5 \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${CLANG_BRANCH}/${CLANG_VERSION}.tar.gz" \
+            -o /tmp/${CLANG_VERSION}.tar.gz
+
+          mkdir -p "prebuilts/clang/host/linux-x86/${CLANG_VERSION}"
+          tar -xzf /tmp/${CLANG_VERSION}.tar.gz \
+            -C "prebuilts/clang/host/linux-x86/${CLANG_VERSION}"
+
+          test -x "prebuilts/clang/host/linux-x86/${CLANG_VERSION}/bin/clang"
+          test -x "prebuilts/clang/host/linux-x86/${CLANG_VERSION}/bin/ld.lld"
+          test -x "prebuilts/clang/host/linux-x86/${CLANG_VERSION}/bin/llvm-nm"
+
+          "prebuilts/clang/host/linux-x86/${CLANG_VERSION}/bin/clang" --version | head -1
+
+      - name: Download mkbootimg
+        run: |
+          set -euo pipefail
+
+          rm -rf tools/mkbootimg
+          mkdir -p tools
+
+          git clone --depth=1 "${MKBOOTIMG_REPO}" tools/mkbootimg
+
+          test -f tools/mkbootimg/mkbootimg.py
+          test -f tools/mkbootimg/gki/generate_gki_certificate.py
+
+      - name: Verify Spacewar build inputs
+        run: |
+          set -euo pipefail
+
+          test -f "arch/arm64/configs/droidspaces_defconfig" || {
+            echo "::error::Missing arch/arm64/configs/droidspaces_defconfig"
+            exit 1
+          }
+
+          test -f "arch/arm64/configs/custom.config" || {
+            echo "::error::Missing arch/arm64/configs/custom.config"
+            exit 1
+          }
+
+          test -f boot_unpack/ramdisk || {
+            echo "::error::Missing boot_unpack/ramdisk"
+            echo "Place the Spacewar ramdisk at boot_unpack/ramdisk in the repository."
+            exit 1
+          }
+
+      - name: Generate base defconfig
+        run: |
+          set -euo pipefail
+
+          rm -rf "${OUT_DIR}"
+          mkdir -p "${OUT_DIR}"
+
+          export CLANG_PATH="$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/${CLANG_VERSION}/bin"
+
+          make \
+            ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            CLANG_TRIPLE="${CLANG_TRIPLE}" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="${CLANG_PATH}/clang" \
+            LD="${CLANG_PATH}/ld.lld" \
+            NM="${CLANG_PATH}/llvm-nm" \
+            OBJCOPY="${CLANG_PATH}/llvm-objcopy" \
+            HOSTCC=gcc \
+            HOSTLD=ld \
+            HOSTAR=ar \
+            O="${OUT_DIR}" \
+            LOCALVERSION= \
+            DISABLE_WRAPPER=1 \
+            droidspaces_defconfig
+
+      - name: Apply custom config fragment
+        run: |
+          set -euo pipefail
+
+          export CLANG_PATH="$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/${CLANG_VERSION}/bin"
+
+          ./scripts/kconfig/merge_config.sh \
+            -m \
+            -O "${OUT_DIR}" \
+            "${OUT_DIR}/.config" \
+            custom.config
+
+          make \
+            ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            CLANG_TRIPLE="${CLANG_TRIPLE}" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="${CLANG_PATH}/clang" \
+            LD="${CLANG_PATH}/ld.lld" \
+            NM="${CLANG_PATH}/llvm-nm" \
+            OBJCOPY="${CLANG_PATH}/llvm-objcopy" \
+            HOSTCC=gcc \
+            HOSTLD=ld \
+            HOSTAR=ar \
+            O="${OUT_DIR}" \
+            LOCALVERSION= \
+            DISABLE_WRAPPER=1 \
+            olddefconfig
+
+      - name: Save final kernel config
+        run: |
+          cp "${OUT_DIR}/.config" "${OUT_DIR}/droidspaces-final.config"
+
+      - name: Build kernel and DTBs
+        run: |
+          set -euo pipefail
+
+          export CLANG_PATH="$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/${CLANG_VERSION}/bin"
+
+          make \
+            ARCH="${ARCH}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            CLANG_TRIPLE="${CLANG_TRIPLE}" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="${CLANG_PATH}/clang" \
+            LD="${CLANG_PATH}/ld.lld" \
+            NM="${CLANG_PATH}/llvm-nm" \
+            OBJCOPY="${CLANG_PATH}/llvm-objcopy" \
+            HOSTCC=gcc \
+            HOSTLD=ld \
+            HOSTAR=ar \
+            O="${OUT_DIR}" \
+            LOCALVERSION= \
+            DISABLE_WRAPPER=1 \
+            -j"$(nproc)" \
+            Image dtbs
+
+      - name: Build boot.img
+        run: |
+          set -euo pipefail
+
+          python3 tools/mkbootimg/mkbootimg.py \
+            --header_version 3 \
+            --os_version 11.0.0 \
+            --os_patch_level 2025-05 \
+            --kernel "${OUT_DIR}/arch/arm64/boot/Image" \
+            --ramdisk boot_unpack/ramdisk \
+            --cmdline 'systemd.unified_cgroup_hierarchy=0 cgroup_enable=memory cgroup_enable=cpuset cgroup_memory=1 swapaccount=1 namespace.unpriv_enable=1 user_namespace.enable=1' \
+            --output boot.img
+
+      - name: Package artifacts
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts
+          cp boot.img artifacts/boot.img
+          cp "${OUT_DIR}/arch/arm64/boot/Image" artifacts/Image
+          cp "${OUT_DIR}/droidspaces-final.config" artifacts/droidspaces-final.config
+
+          if [ -d "${OUT_DIR}/arch/arm64/boot/dts" ]; then
+            find "${OUT_DIR}/arch/arm64/boot/dts" \
+              -type f \
+              \( -name '*.dtb' -o -name '*.dtbo' \) \
+              -exec cp --parents {} artifacts/ \;
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: spacewar-kernel-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
